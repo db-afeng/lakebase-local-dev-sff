@@ -1,6 +1,7 @@
 import logging
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
+from server.auth import CurrentCustomerId
 from server.db import pool, DB_SCHEMA
 from server.schema_detector import column_exists, table_exists, get_promotions_table
 
@@ -11,8 +12,6 @@ router = APIRouter(prefix="/cart")
 # In-memory cart store keyed by customer_id.
 _carts: dict[int, dict[int, int]] = {}
 
-DEMO_CUSTOMER_ID = 1  # Alice Smith
-
 
 class CartItem(BaseModel):
     product_id: int
@@ -20,10 +19,10 @@ class CartItem(BaseModel):
 
 
 @router.get("")
-def get_cart():
+def get_cart(customer_id: CurrentCustomerId):
     """Get the current shopping cart with product details and stock checks."""
     loyalty_active = column_exists("customers", "loyalty_points")
-    cart = _carts.get(DEMO_CUSTOMER_ID, {})
+    cart = _carts.get(customer_id, {})
     if not cart:
         return {"items": [], "subtotal": 0, "item_count": 0}
 
@@ -58,7 +57,11 @@ def get_cart():
                         f"FROM {DB_SCHEMA}.{promo_table} WHERE is_active = true"
                     )
                     for r in cur2.fetchall():
-                        promos[r[0]] = {"sale_price": float(r[1]) if r[1] else None, "badge_text": r[2], "discount_pct": float(r[3])}
+                        promos[r[0]] = {
+                            "sale_price": float(r[1]) if r[1] else None,
+                            "badge_text": r[2],
+                            "discount_pct": float(r[3]),
+                        }
         except Exception:
             pass
 
@@ -70,7 +73,11 @@ def get_cart():
         if not product:
             continue
         promo = promos.get(pid)
-        effective_price = promo["sale_price"] if promo and promo["sale_price"] else float(product["price"])
+        effective_price = (
+            promo["sale_price"]
+            if promo and promo["sale_price"]
+            else float(product["price"])
+        )
         line_total = effective_price * qty
         subtotal += line_total
         item = {
@@ -108,7 +115,7 @@ def get_cart():
                             JOIN {DB_SCHEMA}.customers c ON c.email = lm.email
                             WHERE c.id = %s
                             """,
-                            (DEMO_CUSTOMER_ID,),
+                            (customer_id,),
                         )
                         row = cur.fetchone()
                         if row:
@@ -120,7 +127,7 @@ def get_cart():
 
 
 @router.post("/add")
-def add_to_cart(item: CartItem):
+def add_to_cart(item: CartItem, customer_id: CurrentCustomerId):
     """Add a product to the cart."""
     if item.quantity < 1:
         raise HTTPException(status_code=400, detail="Quantity must be at least 1")
@@ -140,17 +147,20 @@ def add_to_cart(item: CartItem):
             if not row:
                 raise HTTPException(status_code=404, detail="Product not found")
 
-    cart = _carts.setdefault(DEMO_CUSTOMER_ID, {})
+    cart = _carts.setdefault(customer_id, {})
     current_qty = cart.get(item.product_id, 0)
     cart[item.product_id] = current_qty + item.quantity
 
-    return {"message": f"Added {item.quantity}x {row[1]} to cart", "cart_quantity": cart[item.product_id]}
+    return {
+        "message": f"Added {item.quantity}x {row[1]} to cart",
+        "cart_quantity": cart[item.product_id],
+    }
 
 
 @router.post("/update")
-def update_cart_item(item: CartItem):
+def update_cart_item(item: CartItem, customer_id: CurrentCustomerId):
     """Update quantity of a cart item. Set quantity=0 to remove."""
-    cart = _carts.get(DEMO_CUSTOMER_ID, {})
+    cart = _carts.get(customer_id, {})
     if item.product_id not in cart:
         raise HTTPException(status_code=404, detail="Item not in cart")
 
@@ -163,7 +173,7 @@ def update_cart_item(item: CartItem):
 
 
 @router.post("/clear")
-def clear_cart():
+def clear_cart(customer_id: CurrentCustomerId):
     """Clear the entire cart."""
-    _carts[DEMO_CUSTOMER_ID] = {}
+    _carts[customer_id] = {}
     return {"message": "Cart cleared"}

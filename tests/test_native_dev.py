@@ -165,6 +165,7 @@ class NativeIntegrationTests(unittest.TestCase):
                         PGHOST="remote.invalid", PGOPTIONS="-c role=wrong", PGSERVICE="wrong",
                         DATABRICKS_APP_NAME="must-not-be-inherited", ENDPOINT_NAME="projects/wrong/branches/wrong/endpoints/wrong")
         self.sessions = []
+        self.client = urllib.request.build_opener(urllib.request.HTTPCookieProcessor())
         self.addCleanup(self.stop_all)
         self.git("init", "-q")
         self.git("config", "user.name", "Native Test")
@@ -239,9 +240,9 @@ class NativeIntegrationTests(unittest.TestCase):
         data = json.dumps(body).encode() if body is not None else None
         request = urllib.request.Request(state["url"] + path, data=data,
                                          headers={"Content-Type": "application/json"})
-        with urllib.request.urlopen(request, timeout=8) as response:
+        with self.client.open(request, timeout=8) as response:
             text = response.read().decode()
-            return json.loads(text) if "application/json" in response.headers.get("Content-Type", "") else text
+            return json.loads(text) if text and "application/json" in response.headers.get("Content-Type", "") else text
 
     def database_env(self, state):
         env = dev.clean_environment(self.env)
@@ -253,9 +254,15 @@ class NativeIntegrationTests(unittest.TestCase):
         process, state = self.start()
         self.assertEqual(self.command("url").stdout.strip(), state["url"])
         self.assertEqual(self.request(state, "/api/dbtest")["product_count"], 0)
-        with self.assertRaises(urllib.error.HTTPError) as missing_customer:
-            self.request(state, "/api/account")
-        self.assertEqual(missing_customer.exception.code, 500)
+        for path, body in (
+            ("/api/account", None), ("/api/cart", None), ("/api/orders", None),
+            ("/api/orders/1", None), ("/api/cart/add", {"product_id": 1}),
+            ("/api/cart/update", {"product_id": 1}), ("/api/cart/clear", {}),
+            ("/api/orders/checkout", {}),
+        ):
+            with self.subTest(path=path), self.assertRaises(urllib.error.HTTPError) as anonymous:
+                self.request(state, path, body)
+            self.assertEqual(anonymous.exception.code, 401)
         self.assertEqual(self.request(state, "/api/runtime")["database"]["location"], "local-pglite")
         self.assertIn("Supplier Demand View", self.request(state, "/supplier"))
         self.assertIn("/@vite/client", self.request(state, "/"))
@@ -269,8 +276,54 @@ class NativeIntegrationTests(unittest.TestCase):
                                 env=self.database_env(state), text=True, capture_output=True, timeout=35)
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertEqual(self.request(state, "/api/shop/products?search=widget")["total"], 2)
+        alice = self.request(state, "/api/account/login", {"email": "  ALICE@example.invalid "})
+        self.assertEqual(alice["email"], "alice@example.invalid")
+        self.assertIsNone(alice["address"])
         self.assertEqual(self.request(state, "/api/account")["name"], "Alice")
         self.request(state, "/api/cart/add", {"product_id": 1, "quantity": 1})
+
+        # Independent accounts keep their own cart, orders, and saved address.
+        alice_order = self.request(state, "/api/orders")["orders"][0]["id"]
+        self.request(state, "/api/account/logout", {})
+        with self.assertRaises(urllib.error.HTTPError) as logged_out:
+            self.request(state, "/api/account")
+        self.assertEqual(logged_out.exception.code, 401)
+        for path, body, status in (
+            ("/api/account/login", {"email": "missing@example.invalid"}, 401),
+            ("/api/account/signup", {"name": "Duplicate", "email": " ALICE@example.invalid "}, 409),
+            ("/api/account/signup", {"name": " ", "email": "bob@example.invalid"}, 422),
+            ("/api/account/signup", {"name": "Bob", "email": "invalid-email"}, 422),
+        ):
+            with self.subTest(path=path, body=body), self.assertRaises(urllib.error.HTTPError) as invalid:
+                self.request(state, path, body)
+            self.assertEqual(invalid.exception.code, status)
+        bob = self.request(state, "/api/account/signup", {
+            "name": " Bob ", "email": " BOB@example.invalid ", "address": " 1 Test St ",
+        })
+        self.assertNotEqual(bob["id"], alice["id"])
+        self.assertEqual((bob["name"], bob["email"], bob["address"]),
+                         ("Bob", "bob@example.invalid", "1 Test St"))
+        self.assertEqual(self.request(state, "/api/cart")["items"], [])
+        self.assertEqual(self.request(state, "/api/orders")["orders"], [])
+        with self.assertRaises(urllib.error.HTTPError) as other_order:
+            self.request(state, f"/api/orders/{alice_order}")
+        self.assertEqual(other_order.exception.code, 404)
+        self.request(state, "/api/cart/add", {"product_id": 2, "quantity": 1})
+        self.request(state, "/api/cart/update", {"product_id": 2, "quantity": 2})
+        self.assertEqual(self.request(state, "/api/cart")["item_count"], 2)
+        bob_checkout = self.request(state, "/api/orders/checkout", {"address": " 2 Next St "})
+        self.assertEqual(len(bob_checkout["order_ids"]), 1)
+        self.assertEqual(self.request(state, "/api/account")["address"], "2 Next St")
+        self.assertEqual(self.request(state, "/api/cart")["items"], [])
+        self.request(state, "/api/cart/add", {"product_id": 2, "quantity": 1})
+        self.request(state, "/api/cart/clear", {})
+        self.assertEqual(self.request(state, "/api/cart")["items"], [])
+        self.request(state, "/api/account/logout", {})
+        self.request(state, "/api/account/login", {"email": alice["email"]})
+        self.assertEqual(self.request(state, "/api/cart")["item_count"], 1)
+        with self.assertRaises(urllib.error.HTTPError) as bob_order:
+            self.request(state, f"/api/orders/{bob_checkout['order_ids'][0]}")
+        self.assertEqual(bob_order.exception.code, 404)
 
         backend_log = self.repo / ".dev" / state["context"] / "backend.log"
         old_count = backend_log.read_text().count("Started server process")
@@ -404,9 +457,9 @@ schema.CACHE_TTL = 0
 pool.open(wait=True)
 try:
     with pool.connection() as conn:
-        assert conn.execute('SELECT version_num FROM ecommerce.alembic_version').fetchone() == ('0001',)
+        assert conn.execute('SELECT version_num FROM ecommerce.alembic_version').fetchone() == ('0003',)
         assert conn.execute('SELECT count(*) FROM ecommerce.products').fetchone() == (0,)
-        conn.execute("INSERT INTO ecommerce.customers(id,name,email) VALUES(1,'Alice','alice@example.invalid')")
+        assert conn.execute("INSERT INTO ecommerce.customers(name,email) VALUES('Alice','alice@example.invalid') RETURNING id").fetchone() == (1,)
         conn.execute("INSERT INTO ecommerce.products(id,name,price,category) VALUES(1,'Widget',10.25,'Test'),(2,'Other',20,'Test')")
         conn.execute("INSERT INTO ecommerce.inventory(product_id,quantity) VALUES(1,10),(2,20)")
     with pool.connection() as conn:
@@ -415,12 +468,19 @@ try:
         assert conn.execute('SELECT quantity FROM ecommerce.inventory WHERE product_id=1').fetchone() == (10,)
         assert schema.column_exists('products', 'price', conn)
     assert len(shop.list_products(category='',search='WIDGET',limit=50,offset=0)['products']) == 1
-    assert account.get_account()['name'] == 'Alice'
-    cart.add_to_cart(cart.CartItem(product_id=1,quantity=2))
-    assert cart.get_cart()['item_count'] == 2
-    ids = orders.checkout()['order_ids']
-    assert len(orders.get_orders()['orders']) == 1
-    assert len(orders.get_order_detail(ids[0])['items']) == 1
+    try:
+        with pool.connection() as conn:
+            conn.execute("INSERT INTO ecommerce.customers(name,email) VALUES('Duplicate',' ALICE@example.invalid ')")
+    except psycopg.errors.UniqueViolation:
+        pass
+    else:
+        raise AssertionError('Normalized email uniqueness was not enforced')
+    assert account.get_account(1)['name'] == 'Alice'
+    cart.add_to_cart(cart.CartItem(product_id=1,quantity=2), 1)
+    assert cart.get_cart(1)['item_count'] == 2
+    ids = orders.checkout(1)['order_ids']
+    assert len(orders.get_orders(1)['orders']) == 1
+    assert len(orders.get_order_detail(ids[0], 1)['items']) == 1
     with pool.connection() as conn:
         assert conn.execute('SELECT quantity FROM ecommerce.inventory WHERE product_id=1').fetchone() == (8,)
         conn.execute('ALTER TABLE ecommerce.customers ADD COLUMN loyalty_points integer DEFAULT 0, ADD COLUMN email_verified boolean DEFAULT true')
@@ -440,11 +500,11 @@ try:
         assert shop.list_products(category='',search='widget',limit=50,offset=0)['products'][0]['review_count'] == 2
         assert shop.get_product(1)['product']['avg_rating'] == 4.5
         assert shop.featured_products()['promo_deals'][0]['badge_text'] == 'Sale'
-        assert account.get_account()['loyalty_tier'] == 'gold'
-        assert orders.get_order_detail(ids[0])['order']['priority'] == 'normal'
-    cart.add_to_cart(cart.CartItem(product_id=1,quantity=1))
-    assert cart.get_cart()['items'][0]['sale_price'] == 9
-    assert orders.checkout()['points_earned'] == 10
+        assert account.get_account(1)['loyalty_tier'] == 'gold'
+        assert orders.get_order_detail(ids[0], 1)['order']['priority'] == 'normal'
+    cart.add_to_cart(cart.CartItem(product_id=1,quantity=1), 1)
+    assert cart.get_cart(1)['items'][0]['sale_price'] == 9
+    assert orders.checkout(1)['points_earned'] == 10
     assert supplier.supplier_demand()['total_views'] == 10
     with pool.connection() as conn:
         conn.execute('DROP TABLE ecommerce.reviews')
