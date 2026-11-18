@@ -51,6 +51,18 @@ class RuntimeUnitTests(unittest.TestCase):
             self.assertEqual(env["PGSSLMODE"], "require")
             self.assertNotIn("PGSERVICE", env)
 
+    def test_disabled_schema_cache_observes_changes_with_a_frozen_clock(self):
+        from server import schema_detector as schema
+        cursor = Mock()
+        cursor.fetchall.side_effect = [[("reviews", "rating")], []]
+        connection = Mock()
+        connection.cursor.return_value.__enter__ = Mock(return_value=cursor)
+        connection.cursor.return_value.__exit__ = Mock(return_value=False)
+        with patch.object(schema, "CACHE_TTL", 0), patch.object(schema, "_cache_ts", 100), \
+                patch.object(schema, "_cache", {}), patch.object(schema.time, "monotonic", return_value=100):
+            self.assertIn("reviews", schema.get_schema(connection))
+            self.assertNotIn("reviews", schema.get_schema(connection))
+
     def test_runtime_metadata(self):
         from server.runtime import get_runtime_info
         self.assertEqual(get_runtime_info({}), {

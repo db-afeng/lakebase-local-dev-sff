@@ -230,7 +230,17 @@ class Runtime:
         temporary = self.state_path.with_suffix(".tmp")
         temporary.write_text(json.dumps(self.state, indent=2) + "\n")
         temporary.chmod(0o600)
-        temporary.replace(self.state_path)
+        # Windows readers do not necessarily open with FILE_SHARE_DELETE.
+        # Keep replacement atomic, retrying short sharing violations.
+        deadline = time.monotonic() + 2
+        while True:
+            try:
+                temporary.replace(self.state_path)
+                break
+            except PermissionError:
+                if os.name != "nt" or time.monotonic() >= deadline:
+                    raise
+                time.sleep(0.01)
 
     def cleanup_stale(self):
         # Called only while holding the checkout lock; never signal unverified PIDs.

@@ -26,11 +26,11 @@ def _refresh_cache(connection=None):
             for table_name, column_name in cur.fetchall():
                 tables.setdefault(table_name, set()).add(column_name)
             _cache = tables
-            _cache_ts = time.time()
+            _cache_ts = time.monotonic()
 
 
 def get_schema(connection=None) -> dict[str, set[str]]:
-    if time.time() - _cache_ts > CACHE_TTL:
+    if CACHE_TTL <= 0 or not _cache_ts or time.monotonic() - _cache_ts >= CACHE_TTL:
         try:
             _refresh_cache(connection)
         except Exception as e:
