@@ -136,6 +136,12 @@ Additional prerequisites:
 - An existing Lakebase project, specified by `LAKEBASE_PROJECT_NAME`
 - An authorized PostgreSQL OAuth role; use your workspace username after notebook setup
 
+Copy the example config to create your local, Git-ignored settings file:
+
+```bash
+cp lakebase.config.example lakebase.config
+```
+
 Set `LAKEBASE_PROJECT_NAME` and your chosen `LAKEBASE_PROFILE` in your environment
 or `lakebase.config`; no profile is selected by default. Connections use the
 `lakebase-app-schema-owner` group role by default. For the notebook setup, use
