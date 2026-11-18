@@ -52,7 +52,10 @@ class RuntimeUnitTests(unittest.TestCase):
             self.assertNotIn("PGSERVICE", env)
 
     def test_disabled_schema_cache_observes_changes_with_a_frozen_clock(self):
-        from server import schema_detector as schema
+        with patch.dict(os.environ, {"DB_MODE": "pglite", "PGHOST": "127.0.0.1",
+                                     "PGUSER": "postgres", "PGPASSWORD": "fixture",
+                                     "PGDATABASE": "postgres", "PGSSLMODE": "disable"}):
+            from server import schema_detector as schema
         cursor = Mock()
         cursor.fetchall.side_effect = [[("reviews", "rating")], []]
         connection = Mock()
