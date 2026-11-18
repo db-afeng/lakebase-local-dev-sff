@@ -4,11 +4,48 @@ Includes the React frontend, FastAPI backend, Alembic migrations, native local
 development tooling, and Lakebase branch tooling. Credentials, caches, build
 output, and installed dependencies are generated locally.
 
-Prerequisites for macOS/Linux: Python 3.12+, Node.js 20+ (a supported LTS release
-is recommended), npm, Make, and Git with `user.name` configured. Local development
+Prerequisites for macOS, Linux, or Windows with Git Bash: Python 3.12+, Node.js 20+ (a supported LTS release
+is recommended), npm, and Git with `user.name` configured. Local development
 uses PGlite, an in-memory PostgreSQL build, and needs no Databricks credentials
-or PostgreSQL installation. Lakebase mode additionally needs the Databricks CLI
+or PostgreSQL installation. Make is optional. Lakebase mode additionally needs the Databricks CLI
 and `jq`.
+
+## Windows setup (Git Bash)
+
+Install [Git for Windows](https://gitforwindows.org/), Python 3.12+ with **Add
+Python to PATH** enabled, and a supported Node.js LTS release (20+). Reopen
+**Git Bash** after installing. Use a normal user checkout, including paths with
+spaces; WSL, Docker, administrator rights, and Unix symlinks are not required.
+Set `git config user.name "Your Name"` and `git config user.email "you@example.com"`
+if Git is not configured yet.
+
+Run these commands from the repository root in Git Bash:
+
+```bash
+bash scripts/python.sh scripts/dev.py local
+# In a second Git Bash terminal:
+bash scripts/python.sh scripts/dev.py url
+bash scripts/python.sh scripts/dev.py down
+bash scripts/python.sh scripts/dev.py destroy
+bash scripts/python.sh scripts/dev.py check
+```
+
+The launcher finds `python3`, `python`, or `py -3` and creates `.venv/Scripts/`
+on Windows (`.venv/bin/` on macOS/Linux). To select a specific interpreter, set
+`DATACART_PYTHON` to its executable path. Python and Node must be native Windows
+installations. The supervisor uses Git's Bash rather than the Windows WSL launcher.
+
+Use `lakebase` or `refresh` in place of `local` for the Lakebase commands below,
+with your explicitly chosen `LAKEBASE_PROFILE` and project in the environment.
+For optional hooks, run `bash scripts/manage-post-checkout-hook.sh install`
+(or `uninstall`). Lakebase also needs Windows builds of the Databricks CLI and
+`jq` on PATH. Shell scripts and generated hooks use LF line endings even when
+Git is configured with `core.autocrlf=true`.
+
+If GNU Make is installed, the `make` commands below work in Git Bash too.
+Keep this checkout and its `.dev/` and `.env.lakebase` files in your private
+Windows user folder; Windows protects them through inherited NTFS permissions
+rather than POSIX mode bits. Do not share a running checkout between users.
 
 ## Prepare a Databricks workspace
 
@@ -182,10 +219,13 @@ Earlier versions registered a user hook under `~/.databricks/user-githooks/`.
 This installer leaves that external file alone. While forwarding an older hook,
 the dispatcher suppresses duplicate DataCart provisioning.
 
-Run the local checks (including isolated PGlite integration tests and a frontend build) with:
+Run the local checks (including isolated PGlite integration tests, mocked Lakebase
+refresh, Git hooks, and a frontend build) with:
 
 ```bash
 make check
+# Or, without Make, on any supported OS:
+bash scripts/python.sh scripts/dev.py check
 ```
 
 ## Current limitations

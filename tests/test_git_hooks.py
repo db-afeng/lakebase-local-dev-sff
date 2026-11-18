@@ -4,6 +4,7 @@ import os
 from pathlib import Path
 import shutil
 import subprocess
+import sys
 import tempfile
 import unittest
 
@@ -19,16 +20,16 @@ class GitHooksTest(unittest.TestCase):
         self.repo.mkdir()
         self.env = {k: v for k, v in os.environ.items() if not k.startswith("GIT_")}
         self.env.update(
-            HOME=str(self.base), GIT_CONFIG_GLOBAL=str(self.base / "global.config"),
+            HOME=self.base.as_posix(), GIT_CONFIG_GLOBAL=str(self.base / "global.config"),
             GIT_CONFIG_NOSYSTEM="1",
         )
         self.git("init", "-q")
         self.git("config", "user.name", "Hook Test")
         self.git("config", "user.email", "test@example.invalid")
         (self.repo / "scripts").mkdir()
-        for name in ("manage_git_hooks.py", "manage-post-checkout-hook.sh"):
+        for name in ("manage_git_hooks.py", "manage-post-checkout-hook.sh", "python.sh"):
             shutil.copy2(SOURCE / "scripts" / name, self.repo / "scripts" / name)
-        self.write_hook(self.repo / ".githooks/post-checkout", 'printf "app:%s:%s\\n" "$PWD" "$*" >> "$HOME/events"\n')
+        self.write_hook(self.repo / ".githooks/post-checkout", 'printf "app:%s:%s\\n" "$(git rev-parse --show-toplevel)" "$*" >> "$HOME/events"\n')
         self.git("add", ".")
         self.git("commit", "-qm", "fixture")
 
@@ -41,11 +42,11 @@ class GitHooksTest(unittest.TestCase):
 
     def manage(self, command, cwd=None, check=True):
         cwd = cwd or self.repo
-        return self.run_command(["bash", str(cwd / "scripts/manage-post-checkout-hook.sh"), command], cwd=cwd, check=check)
+        return self.run_command([sys.executable, str(cwd / "scripts/manage_git_hooks.py"), command], cwd=cwd, check=check)
 
     def write_hook(self, path, body):
         path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text("#!/bin/sh\n" + body)
+        path.write_text("#!/bin/sh\n" + body, newline="\n")
         path.chmod(0o755)
         return path
 
@@ -80,7 +81,11 @@ class GitHooksTest(unittest.TestCase):
         self.assertEqual(self.events()[0], "global")
         self.assertEqual(len(self.events()), 2)
         managed = Path(self.git("config", "--get", "core.hooksPath").stdout.strip())
-        result = self.run_command([str(managed / "pre-push"), "origin", "url with spaces"], input="input line\n", check=False)
+        bash = "bash"
+        if os.name == "nt":
+            git_path = Path(shutil.which("git"))
+            bash = str(next(p / "bin/bash.exe" for p in git_path.parents if (p / "bin/bash.exe").is_file()))
+        result = self.run_command([bash, (managed / "pre-push").as_posix(), "origin", "url with spaces"], input="input line\n", check=False)
         self.assertEqual(result.returncode, 9)
         self.assertEqual((self.base / "stdin").read_text(), "input line\n")
         self.assertEqual((self.base / "args").read_text(), "origin\nurl with spaces\n")
@@ -98,7 +103,7 @@ class GitHooksTest(unittest.TestCase):
         self.write_hook(other / ".existing-hooks/post-checkout", 'echo linked-existing >> "$HOME/events"\n')
         self.git("switch", "-qc", "linked-feature", cwd=other)
         self.assertEqual(self.events()[0], "linked-existing")
-        self.assertIn(f"app:{other}:", self.events()[1])
+        self.assertIn(f"app:{other.as_posix()}:", self.events()[1])
         self.manage("uninstall", cwd=other)
         self.assertEqual(self.git("config", "--get", "core.hooksPath").stdout.strip(), ".existing-hooks")
 
@@ -118,7 +123,7 @@ class GitHooksTest(unittest.TestCase):
         self.git("config", "core.hooksPath", ".githooks")
         # Model the skip guard in the real repo hook for a legacy dispatch chain.
         hook = self.repo / ".githooks/post-checkout"
-        hook.write_text(hook.read_text().replace('#!/bin/sh\n', '#!/bin/sh\n[ "${DATACART_SKIP_POST_CHECKOUT:-0}" != "1" ] || exit 0\n'))
+        hook.write_text(hook.read_text().replace('#!/bin/sh\n', '#!/bin/sh\n[ "${DATACART_SKIP_POST_CHECKOUT:-0}" != "1" ] || exit 0\n'), newline="\n")
         self.manage("install")
         self.git("hook", "run", "post-checkout", "--", "old", "new", "1")
         self.assertEqual(len(self.events()), 1)
@@ -136,7 +141,7 @@ class GitHooksTest(unittest.TestCase):
         self.manage("install")
         managed = Path(self.git("config", "--get", "core.hooksPath").stdout.strip())
         hook = managed / "post-checkout"
-        hook.write_text(hook.read_text() + "# user change\n")
+        hook.write_text(hook.read_text() + "# user change\n", newline="\n")
         self.assertNotEqual(self.manage("uninstall", check=False).returncode, 0)
         self.assertTrue(hook.exists())
         self.git("config", "core.hooksPath", ".new-choice")
@@ -155,7 +160,9 @@ class GitHooksTest(unittest.TestCase):
         hook = self.write_hook(self.repo / ".git/hooks/post-checkout", "exit 17\n")
         hook.chmod(0o644)
         self.manage("install")
-        self.git("hook", "run", "post-checkout", "--", "old", "new", "1")
+        # Windows does not provide POSIX executable permission bits.
+        if os.name != "nt":
+            self.git("hook", "run", "post-checkout", "--", "old", "new", "1")
 
     def test_lakebase_failure_does_not_mask_original_status(self):
         self.write_hook(self.repo / ".githooks/post-checkout", "exit 21\n")

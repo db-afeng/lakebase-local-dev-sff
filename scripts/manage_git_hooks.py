@@ -20,6 +20,33 @@ p4-pre-submit post-index-change""".split()
 MARKER = "# datacart-storefront standard Git hook dispatcher"
 
 
+def shell_path(path):
+    return Path(path).as_posix()
+
+
+def hook_command(path, args):
+    if os.name != "nt":
+        return [str(path), *args]
+    # Windows cannot execute a shebang script through CreateProcess.
+    # Leave native/batch hooks to Windows; invoke shell hooks through Git Bash.
+    if path.suffix.lower() in {".exe", ".cmd", ".bat", ".com"}:
+        return [str(path), *args]
+    git_exe = Path(shutil.which("git"))
+    candidates = [git_exe.parent / "bash.exe",
+                  *(parent / "bin/bash.exe" for parent in git_exe.parents)]
+    bash = next(p for p in candidates if p.is_file())
+    return [str(bash), shell_path(path), *args]
+
+
+def wrapper_text(directory, name, python):
+    return (
+        "#!/usr/bin/env bash\n" + MARKER + "\nexec "
+        + shlex.quote(shell_path(python)) + " "
+        + shlex.quote(shell_path(directory / "dispatch.py"))
+        + " dispatch " + shlex.quote(name) + ' "$@"\n'
+    )
+
+
 def git(*args, check=True):
     return subprocess.run(
         ["git", *args], text=True, stdout=subprocess.PIPE,
@@ -55,7 +82,7 @@ def install():
     previous_path = effective_path()
     if is_managed(previous_path):
         state = json.loads((Path(previous_path) / "state.json").read_text())
-        if state["common_dir"] != str(common):
+        if Path(state["common_dir"]) != common:
             raise RuntimeError("Active DataCart hooks belong to another repository.")
         print("DataCart checkout hook is already installed.")
         return
@@ -84,20 +111,16 @@ def install():
     try:
         state = {
             "version": 1, "scope": scope, "previous_values": old_values,
-            "original_hooks_path": original, "common_dir": str(common),
+            "original_hooks_path": original, "common_dir": str(common), "python": sys.executable,
         }
         (stage / "state.json").write_text(json.dumps(state, indent=2) + "\n")
         shutil.copyfile(__file__, stage / "dispatch.py")
         for name in names:
             wrapper = stage / name
-            wrapper.write_text(
-                "#!/usr/bin/env bash\n" + MARKER + "\nexec python3 "
-                + shlex.quote(str(destination / "dispatch.py"))
-                + " dispatch " + shlex.quote(name) + ' "$@"\n'
-            )
+            wrapper.write_text(wrapper_text(destination, name, sys.executable), encoding="utf-8", newline="\n")
             wrapper.chmod(0o755)
         stage.rename(destination)
-        result = git("config", scope, "--replace-all", "core.hooksPath", str(destination), check=False)
+        result = git("config", scope, "--replace-all", "core.hooksPath", shell_path(destination), check=False)
         if result.returncode:
             shutil.rmtree(destination)
             raise RuntimeError(result.stderr.strip())
@@ -116,7 +139,7 @@ def uninstall():
     directory = Path(current)
     state = json.loads((directory / "state.json").read_text())
     common = git("rev-parse", "--path-format=absolute", "--git-common-dir").stdout.strip()
-    if state["common_dir"] != common:
+    if Path(state["common_dir"]) != Path(common):
         raise RuntimeError("Hook state belongs to another repository; refusing to change it.")
     scope = state["scope"]
     if values(scope) != [current]:
@@ -125,11 +148,12 @@ def uninstall():
     for path in directory.iterdir():
         if path.name in {"state.json", "dispatch.py"}:
             continue
-        expected = (
-            "#!/usr/bin/env bash\n" + MARKER + "\nexec python3 "
-            + shlex.quote(str(directory / "dispatch.py"))
-            + " dispatch " + shlex.quote(path.name) + ' "$@"\n'
-        )
+        if "python" in state:
+            expected = wrapper_text(directory, path.name, state["python"])
+        else:
+            expected = ("#!/usr/bin/env bash\n" + MARKER + "\nexec python3 "
+                        + shlex.quote(str(directory / "dispatch.py"))
+                        + " dispatch " + shlex.quote(path.name) + ' "$@"\n')
         if not path.is_file() or path.read_text() != expected:
             raise RuntimeError(f"Managed hook was modified: {path}; preserve it before uninstalling.")
     git("config", scope, "--unset-all", "core.hooksPath")
@@ -149,14 +173,14 @@ def dispatch(name, args):
         env = os.environ.copy()
         if name == "post-checkout":
             env["DATACART_SKIP_POST_CHECKOUT"] = "1"
-        status = subprocess.run([str(original.absolute()), *args], env=env).returncode
+        status = subprocess.run(hook_command(original.absolute(), args), env=env).returncode
     if name == "post-checkout":
         root = git("rev-parse", "--show-toplevel", check=False)
         common = git("rev-parse", "--path-format=absolute", "--git-common-dir", check=False)
-        if root.returncode == 0 and common.stdout.strip() == state["common_dir"]:
+        if root.returncode == 0 and Path(common.stdout.strip()) == Path(state["common_dir"]):
             hook = Path(root.stdout.strip()) / ".githooks/post-checkout"
             if hook.is_file() and os.access(hook, os.X_OK):
-                subprocess.run([str(hook), *args], check=False)
+                subprocess.run(hook_command(hook, args), check=False)
     return status if status >= 0 else 128 - status
 
 

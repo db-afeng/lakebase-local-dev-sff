@@ -1,4 +1,4 @@
 #!/usr/bin/env bash
 set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-exec python3 "$SCRIPT_DIR/manage_git_hooks.py" "$@"
+exec bash "$SCRIPT_DIR/python.sh" "$SCRIPT_DIR/manage_git_hooks.py" "$@"

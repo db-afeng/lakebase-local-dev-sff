@@ -25,7 +25,7 @@ context_id_for() {
     }
 
     printf '%s\0%s' "$git_user" "$git_branch" |
-        python3 -c 'import hashlib, sys; print(hashlib.sha256(sys.stdin.buffer.read()).hexdigest()[:8])'
+        bash "$SCRIPT_DIR/python.sh" -c 'import hashlib, sys; print(hashlib.sha256(sys.stdin.buffer.read()).hexdigest()[:8])'
 }
 
 run_self_test() {

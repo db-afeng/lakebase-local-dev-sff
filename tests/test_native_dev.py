@@ -124,7 +124,7 @@ class RuntimeUnitTests(unittest.TestCase):
                 self.assertNotIn("--profile", runtime.run_command.call_args.args[1])
 
     def test_stale_pid_reuse_never_signals_an_unrelated_process(self):
-        with patch.object(dev, "fingerprint", return_value="different start"), patch.object(dev.os, "killpg") as kill:
+        with patch.object(dev, "fingerprint", return_value="different start"), patch.object(dev.subprocess, "run") as kill:
             dev.stop_group(12345, "original start")
         kill.assert_not_called()
 
@@ -164,7 +164,12 @@ class NativeIntegrationTests(unittest.TestCase):
 
     def link_dependencies(self, repo):
         for relative in (".venv", "frontend/node_modules", "scripts/dev/node_modules"):
-            (repo / relative).symlink_to(SOURCE / relative, target_is_directory=True)
+            if os.name == "nt":
+                # Junctions need neither Administrator nor Windows Developer Mode.
+                subprocess.run(["cmd", "/c", "mklink", "/J", str(repo / relative),
+                                str(SOURCE / relative)], check=True, capture_output=True)
+            else:
+                (repo / relative).symlink_to(SOURCE / relative, target_is_directory=True)
         (repo / ".dev").mkdir(exist_ok=True)
         shutil.copy2(SOURCE / ".dev/python-dependencies", repo / ".dev/python-dependencies")
 
@@ -191,7 +196,8 @@ class NativeIntegrationTests(unittest.TestCase):
         root = root or self.repo
         output = (root / ".dev/test-output.log").open("a")
         process = subprocess.Popen([sys.executable, script, mode], cwd=root,
-                                   env=self.env, stdout=output, stderr=subprocess.STDOUT)
+                                   env=self.env, stdout=output, stderr=subprocess.STDOUT,
+                                   **({"creationflags": subprocess.CREATE_NEW_PROCESS_GROUP} if os.name == "nt" else {}))
         self.sessions.append((root, process, output))
         def ready():
             if process.poll() is not None:
@@ -271,7 +277,7 @@ class NativeIntegrationTests(unittest.TestCase):
             self.assertIn(json.loads(websocket.recv(timeout=8))["type"], {"update", "full-reload"})
         self.assertIn("native-hmr-test", self.request(state, "/src/index.css"))
 
-        process.send_signal(signal.SIGINT)
+        process.send_signal(signal.CTRL_BREAK_EVENT if os.name == "nt" else signal.SIGINT)
         self.assertEqual(process.wait(timeout=20), 0)
         self.assertFalse((self.repo / ".dev/session.json").exists())
         _, fresh = self.start()
@@ -292,7 +298,11 @@ class NativeIntegrationTests(unittest.TestCase):
         self.assertNotEqual(first["url"], second["url"])
         self.assertNotEqual(first["backend_url"], second["backend_url"])
         self.assertNotEqual(first["database_port"], second["database_port"])
-        os.kill(first["services"]["pglite"]["pid"], signal.SIGKILL)
+        database_pid = first["services"]["pglite"]["pid"]
+        if os.name == "nt":
+            subprocess.run(["taskkill", "/PID", str(database_pid), "/F"], check=True, capture_output=True)
+        else:
+            os.kill(database_pid, signal.SIGKILL)
         self.assertNotEqual(process.wait(timeout=20), 0)
         self.assertFalse((self.repo / ".dev/session.json").exists())
         for service in first["services"].values():
@@ -349,7 +359,7 @@ ENDPOINT_NAME=projects/mock/branches/mock/endpoints/dev
 PGOPTIONS=-c role=postgres
 ENV
 chmod 600 .env.lakebase
-''')
+''', newline='\n')
         process, before = self.start(mode="lakebase", script="scripts/mock-lakebase-runtime.py")
         self.command("refresh")
         after = self.state()

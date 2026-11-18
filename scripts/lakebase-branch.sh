@@ -251,7 +251,14 @@ if [[ -z "$LAKEBASE_PROJECT_NAME" ]]; then
     exit 1
 fi
 
-for tool in databricks jq python3; do
+# Native jq/Databricks emit CRLF; normalize before Bash uses IDs and tokens.
+# MSYS must preserve CLI JSON arguments and slash-prefixed resource identifiers.
+if [[ "${OSTYPE:-}" == msys* || "${OSTYPE:-}" == cygwin* ]]; then
+    export MSYS_NO_PATHCONV=1 MSYS2_ARG_CONV_EXCL='*'
+    jq() { command jq "$@" | tr -d '\r'; }
+fi
+
+for tool in databricks jq; do
     command -v "$tool" >/dev/null 2>&1 || {
         echo "$tool is required for Lakebase development" >&2
         exit 1
@@ -269,7 +276,7 @@ if [[ -z "$LAKEBASE_PROFILE" ]]; then
 fi
 
 databricks_cli() {
-    databricks "$@" --profile "$LAKEBASE_PROFILE"
+    databricks "$@" --profile "$LAKEBASE_PROFILE" | tr -d '\r'
 }
 
 GIT_USER_RAW="$(git -C "$REPO_ROOT" config user.name || true)"

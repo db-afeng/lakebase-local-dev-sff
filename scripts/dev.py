@@ -1,13 +1,12 @@
-"""Native development supervisor (macOS/Linux); invoked through Make.
+"""Native development supervisor for macOS, Linux, and Windows with Git Bash.
 
-The supervisor owns each service's process group and a private control socket.
+The supervisor owns each service tree and an authenticated loopback control socket.
 Only the supervisor restarts the backend; a database exit always ends a session.
 """
 
 from __future__ import annotations
 
 import argparse
-import fcntl
 import hashlib
 import json
 import os
@@ -23,6 +22,11 @@ import time
 import urllib.error
 import urllib.request
 
+if os.name == "nt":
+    import msvcrt
+else:
+    import fcntl
+
 ROOT = Path(__file__).resolve().parents[1]
 READY_PREFIX = "DATACART_READY "
 
@@ -32,7 +36,28 @@ class DevError(RuntimeError):
 
 
 def fingerprint(pid: int) -> str:
-    """Guard stale-state cleanup against PID reuse; ps works on macOS and Linux."""
+    """Guard stale-state cleanup against PID reuse using process creation time."""
+    if os.name == "nt":
+        import ctypes
+        from ctypes import wintypes
+        kernel = ctypes.WinDLL("kernel32", use_last_error=True)
+        kernel.OpenProcess.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
+        kernel.OpenProcess.restype = wintypes.HANDLE
+        kernel.GetProcessTimes.argtypes = [wintypes.HANDLE] + [ctypes.POINTER(wintypes.FILETIME)] * 4
+        kernel.CloseHandle.argtypes = [wintypes.HANDLE]
+        handle = kernel.OpenProcess(0x1000, False, pid)  # QUERY_LIMITED_INFORMATION
+        if not handle:
+            return ""
+        try:
+            times = [wintypes.FILETIME() for _ in range(4)]
+            if not kernel.GetProcessTimes(handle, *(ctypes.byref(t) for t in times)):
+                return ""
+            # GetProcessTimes also succeeds for a terminated, unreaped process.
+            if times[1].dwLowDateTime or times[1].dwHighDateTime:
+                return ""
+            return str((times[0].dwHighDateTime << 32) | times[0].dwLowDateTime)
+        finally:
+            kernel.CloseHandle(handle)
     result = subprocess.run(
         ["ps", "-p", str(pid), "-o", "lstart="], capture_output=True, text=True,
     )
@@ -41,6 +66,13 @@ def fingerprint(pid: int) -> str:
 
 def stop_group(pid: int, started: str, timeout: float = 8, verify: bool = True) -> None:
     if verify and (not started or fingerprint(pid) != started):
+        return
+    if os.name == "nt":
+        subprocess.run(["taskkill", "/PID", str(pid), "/T", "/F"],
+                       stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        deadline = time.monotonic() + timeout
+        while fingerprint(pid) and time.monotonic() < deadline:
+            time.sleep(0.05)
         return
     try:
         os.killpg(pid, signal.SIGTERM)
@@ -57,6 +89,38 @@ def stop_group(pid: int, started: str, timeout: float = 8, verify: bool = True) 
         os.killpg(pid, signal.SIGKILL)
     except ProcessLookupError:
         pass
+
+
+def lock_file(handle):
+    """Acquire a nonblocking checkout lock, released when the handle closes."""
+    if os.name == "nt":
+        handle.seek(0)
+        # Windows byte-range locks may extend beyond the end of the file.
+        msvcrt.locking(handle.fileno(), msvcrt.LK_NBLCK, 1)
+    else:
+        fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
+
+
+def venv_python(root):
+    return Path(root) / (".venv/Scripts/python.exe" if os.name == "nt" else ".venv/bin/python")
+
+
+def service_command(command):
+    """Resolve npm.cmd and Git Bash explicitly for native Windows subprocesses."""
+    command = [str(arg) for arg in command]
+    if command[0] == "bash" and os.name == "nt":
+        # System32/bash.exe can be a WSL launcher. Prefer Bash shipped with Git.
+        git = shutil.which("git")
+        candidates = [] if not git else [Path(git).parent / "bash.exe",
+            *(parent / "bin/bash.exe" for parent in Path(git).parents)]
+        bash = next((str(p) for p in candidates if p.is_file()), None)
+        if not bash:
+            raise DevError("Git Bash is required; install Git for Windows and put Git on PATH.")
+        command[0] = bash
+        command[1:] = [arg.replace("\\", "/") for arg in command[1:]]
+    elif command[0] == "npm":
+        command[0] = shutil.which("npm") or "npm"
+    return command
 
 
 def clean_environment(source: dict[str, str]) -> dict[str, str]:
@@ -94,9 +158,11 @@ class Service:
         self.log = log_path.open("a", buffering=1)
         try:
             self.process = subprocess.Popen(
-                [str(arg) for arg in command], cwd=root, env=env,
+                service_command(command), cwd=root, env=env,
                 stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
-                bufsize=1, start_new_session=True, pass_fds=pass_fds,
+                bufsize=1, encoding="utf-8", errors="replace",
+                **({"creationflags": subprocess.CREATE_NEW_PROCESS_GROUP} if os.name == "nt"
+                   else {"start_new_session": True, "pass_fds": pass_fds}),
             )
         except OSError:
             self.log.close()
@@ -135,9 +201,6 @@ class Runtime:
         self.root = Path(root).resolve()
         self.directory = self.root / ".dev"
         self.state_path = self.directory / "session.json"
-        # A short path also works when the checkout is deeply nested (AF_UNIX limit).
-        identity = hashlib.sha256(str(self.root).encode()).hexdigest()[:20]
-        self.socket_path = Path(f"/tmp/datacart-{os.getuid()}-{identity}.sock")
         self.services = {}
         self.stopping = False
         self.server = None
@@ -150,8 +213,8 @@ class Runtime:
         self.directory.mkdir(mode=0o700, exist_ok=True)
         handle = (self.directory / "runner.lock").open("a")
         try:
-            fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        except BlockingIOError:
+            lock_file(handle)
+        except OSError:
             handle.close()
             raise DevError("A development session is already running in this checkout; use make dev-down first.")
         return handle
@@ -174,7 +237,6 @@ class Runtime:
         for service in reversed(list(self.read_state().get("services", {}).values())):
             stop_group(service["pid"], service["started"], timeout=2)
         self.state_path.unlink(missing_ok=True)
-        self.socket_path.unlink(missing_ok=True)
 
     def request(self, action, timeout=900):
         state = self.read_state()
@@ -184,9 +246,9 @@ class Runtime:
                 key: value for key, value in os.environ.items()
                 if key.startswith("LAKEBASE_") or key == "DATABRICKS_CONFIG_FILE"
             }
-        with socket.socket(socket.AF_UNIX) as connection:
+        with socket.socket() as connection:
             connection.settimeout(timeout)
-            connection.connect(str(self.socket_path))
+            connection.connect(("127.0.0.1", state["control_port"]))
             connection.sendall((json.dumps(request) + "\n").encode())
             with connection.makefile("r") as stream:
                 response = json.loads(stream.readline())
@@ -267,7 +329,7 @@ class Runtime:
 
     def context_id(self):
         return subprocess.check_output(
-            ["bash", str(self.root / "scripts/dev-context-id.sh")], cwd=self.root, text=True,
+            service_command(["bash", self.root / "scripts/dev-context-id.sh"]), cwd=self.root, text=True,
         ).strip()
 
     def prepare_dependencies(self):
@@ -275,9 +337,9 @@ class Runtime:
         with (self.directory / "dependencies.lock").open("a") as handle:
             while True:
                 try:
-                    fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                    lock_file(handle)
                     break
-                except BlockingIOError:
+                except OSError:
                     self.poll()
             self._prepare_dependencies()
 
@@ -290,7 +352,7 @@ class Runtime:
         node_major = int(subprocess.check_output(["node", "-p", "process.versions.node.split('.')[0]"], text=True).strip())
         if node_major < 20:
             raise DevError("Node.js 20 or newer is required.")
-        python = self.root / ".venv/bin/python"
+        python = venv_python(self.root)
         if not python.exists():
             self.run_command("dependencies", [sys.executable, "-m", "venv", self.root / ".venv"])
         self.python = python
@@ -346,6 +408,18 @@ class Runtime:
             return False
 
     def start_backend(self):
+        if os.name == "nt":
+            # Uvicorn's Windows reloader shares its own socket with spawned workers.
+            # A POSIX descriptor inherited from this supervisor is not portable.
+            port = self.state.get("backend_url", "").rsplit(":", 1)[-1] or "0"
+            backend = self.start_service("backend", [
+                self.python, self.root / "scripts/dev_backend.py", port,
+            ])
+            self.wait_for(lambda: bool(backend.ready), "backend socket")
+            self.state["backend_url"] = backend.ready["url"]
+            self.write_state()
+            self.wait_for(self.backend_ready, "backend database readiness")
+            return
         fd = self.backend_socket.fileno()
         self.start_service("backend", [
             self.python, "-m", "uvicorn", "app:app", "--fd", str(fd), "--reload",
@@ -404,11 +478,11 @@ class Runtime:
             self.log_directory = self.directory / self.state["context"]
             self.log_directory.mkdir(mode=0o700, exist_ok=True)
             self.env = clean_environment(dict(os.environ))
-            for sig in (signal.SIGINT, signal.SIGTERM):
+            for sig in (signal.SIGINT, signal.SIGTERM, *([signal.SIGBREAK] if os.name == "nt" else [])):
                 signal.signal(sig, lambda *_: setattr(self, "stopping", True))
-            self.server = socket.socket(socket.AF_UNIX)
-            self.server.bind(str(self.socket_path))
-            self.socket_path.chmod(0o600)
+            self.server = socket.socket()
+            self.server.bind(("127.0.0.1", 0))
+            self.state["control_port"] = self.server.getsockname()[1]
             self.server.listen(4)
             self.server.settimeout(0.1)
             self.write_state()
@@ -424,10 +498,11 @@ class Runtime:
                 else:
                     self.provision()
                 self.run_command("migrations", [self.python, "-m", "alembic", "upgrade", "head"])
-                self.backend_socket = socket.socket()
-                self.backend_socket.bind(("127.0.0.1", 0))
-                self.backend_socket.listen(128)
-                self.state["backend_url"] = f"http://127.0.0.1:{self.backend_socket.getsockname()[1]}"
+                if os.name != "nt":
+                    self.backend_socket = socket.socket()
+                    self.backend_socket.bind(("127.0.0.1", 0))
+                    self.backend_socket.listen(128)
+                    self.state["backend_url"] = f"http://127.0.0.1:{self.backend_socket.getsockname()[1]}"
                 self.start_backend()
                 frontend_env = dict(self.env, DEV_BACKEND_URL=self.state["backend_url"])
                 frontend = self.start_service("frontend", ["node", self.root / "frontend/dev.mjs"],
@@ -451,10 +526,23 @@ class Runtime:
                 if self.backend_socket:
                     self.backend_socket.close()
                 self.server.close()
-                self.socket_path.unlink(missing_ok=True)
                 self.state_path.unlink(missing_ok=True)
 
+    def check(self):
+        self.command("setup")
+        commands = [
+            [venv_python(self.root), "-m", "unittest", "discover", "-s", "tests", "-p", "test_*.py"],
+            ["bash", "scripts/dev-context-id.sh", "--self-test"],
+            ["bash", "scripts/lakebase-branch.sh", "--self-test"],
+        ]
+        for command in commands:
+            subprocess.run(service_command(command), cwd=self.root, check=True)
+        subprocess.run(service_command(["npm", "run", "build"]), cwd=self.root / "frontend", check=True)
+
     def command(self, action):
+        if action == "check":
+            self.check()
+            return
         if action == "setup":
             self.directory.mkdir(mode=0o700, exist_ok=True)
             self.log_directory = self.directory / "setup"
@@ -474,7 +562,7 @@ class Runtime:
         try:
             operation = "stop" if action in {"down", "destroy"} else "info" if action == "url" else action
             response = self.request(operation)
-        except (OSError, ValueError):
+        except (OSError, ValueError, KeyError):
             # Never treat an unresponsive but locked runner as stale.
             with self.lock():
                 previous = self.read_state()
@@ -510,7 +598,7 @@ class Runtime:
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("command", choices=("local", "lakebase", "url", "refresh", "down", "destroy", "setup"))
+    parser.add_argument("command", choices=("local", "lakebase", "url", "refresh", "down", "destroy", "setup", "check"))
     args = parser.parse_args()
     os.umask(0o077)
     try:
