@@ -32,12 +32,12 @@ import {
 import './index.css'
 
 type View = 'home' | 'shop' | 'product' | 'cart' | 'orders'
-type RuntimeLocation = 'local' | 'docker' | 'production'
+type RuntimeLocation = 'local' | 'production'
 
 interface RuntimeInfo {
   backend: RuntimeLocation
   database: {
-    location: 'local-docker' | 'lakebase'
+    location: 'local-pglite' | 'lakebase'
     project: string | null
     branch: string | null
   }
@@ -45,9 +45,7 @@ interface RuntimeInfo {
 
 const frontendRuntime: RuntimeLocation = import.meta.env.DEV
   ? 'local'
-  : import.meta.env.VITE_FRONTEND_RUNTIME === 'docker'
-    ? 'docker'
-    : 'production'
+  : 'production'
 
 interface Features {
   reviews_active?: boolean
@@ -1059,7 +1057,7 @@ function RuntimeIndicator({ runtime }: { runtime: RuntimeInfo | null }) {
     runtime?.database.location === 'lakebase'
       ? `Lakebase · ${runtime.database.branch} · ${runtime.database.project}`
       : runtime
-        ? 'Local Docker'
+        ? 'Local PGlite'
         : 'Unavailable'
 
   return (

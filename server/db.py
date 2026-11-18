@@ -7,6 +7,7 @@ from server.config import get_workspace_client
 logger = logging.getLogger(__name__)
 
 DB_SCHEMA = os.environ.get("DB_SCHEMA", "ecommerce")
+IS_PGLITE = os.environ.get("DB_MODE") == "pglite"
 password = os.environ.get("PGPASSWORD")
 group_role = os.environ.get("LAKEBASE_PG_ROLE")
 
@@ -17,7 +18,7 @@ w = None if password is not None else get_workspace_client()
 # to its Lakebase project as a resource (see resources/datacart_storefront.app.yml),
 # the Apps platform injects PGHOST/PGPORT/PGUSER/PGDATABASE/PGSSLMODE at runtime.
 # The app mints a credential as its service principal but logs in as the OAuth
-# group role from LAKEBASE_PG_ROLE. Local Postgres keeps using PGUSER/PGPASSWORD.
+# group role from LAKEBASE_PG_ROLE. Local PGlite uses PGUSER/PGPASSWORD.
 if password is None and not ENDPOINT_NAME:
     raise RuntimeError("ENDPOINT_NAME is required when PGPASSWORD is not set")
 if password is None and not group_role:
@@ -40,6 +41,9 @@ class OAuthConnection(psycopg.Connection):
 
     @classmethod
     def connect(cls, conninfo="", **kwargs):
+        if IS_PGLITE:
+            # Socket clients share one underlying session, including prepared names.
+            kwargs["prepare_threshold"] = None
         if password is not None:
             kwargs["password"] = password
             return super().connect(conninfo, **kwargs)
@@ -66,7 +70,7 @@ pool = ConnectionPool(
     conninfo=f"dbname={database} user={username} host={host} port={port} sslmode={sslmode} connect_timeout=15",
     connection_class=OAuthConnection,
     min_size=1,
-    max_size=10,
+    max_size=1 if IS_PGLITE else 10,
     max_lifetime=2700,
     open=False,
 )

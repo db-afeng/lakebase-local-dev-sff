@@ -7,7 +7,7 @@ router = APIRouter(prefix="/shop")
 
 def _get_active_promos(cur) -> dict[int, dict]:
     """Fetch active promotions keyed by product_id. Returns empty dict if table missing."""
-    promo_table = get_promotions_table()
+    promo_table = get_promotions_table(cur.connection)
     if not promo_table:
         return {}
     try:
@@ -273,7 +273,7 @@ def featured_products():
 
             # Spring Sale deals (needs promotions synced table)
             promo_deals = []
-            promo_table = get_promotions_table()
+            promo_table = get_promotions_table(conn)
             if promo_table:
                 try:
                     loyalty_select3 = ", FLOOR(p.price)::INT AS loyalty_points_earned" if loyalty_active else ""

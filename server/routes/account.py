@@ -12,9 +12,9 @@ def get_account():
     with pool.connection() as conn:
         with conn.cursor() as cur:
             cols = ["c.id", "c.name", "c.email"]
-            if column_exists("customers", "loyalty_points"):
+            if column_exists("customers", "loyalty_points", conn):
                 cols.append("c.loyalty_points")
-            if column_exists("customers", "email_verified"):
+            if column_exists("customers", "email_verified", conn):
                 cols.append("c.email_verified")
 
             cur.execute(
@@ -25,7 +25,7 @@ def get_account():
             col_names = [d.name for d in cur.description]
             result = dict(zip(col_names, row))
 
-            if table_exists("loyalty_members"):
+            if table_exists("loyalty_members", conn):
                 cur.execute(
                     f"""
                     SELECT lm.tier, lm.total_earned, lm.enrolled_at

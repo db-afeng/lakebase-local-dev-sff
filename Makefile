@@ -1,54 +1,29 @@
 SHELL := /bin/bash
+PYTHON := $(if $(wildcard .venv/bin/python),.venv/bin/python,python3)
 
-DEV_CONTEXT_ID := $(shell bash ./scripts/dev-context-id.sh)
-ifeq ($(strip $(DEV_CONTEXT_ID)),)
-$(error Unable to determine development context ID)
-endif
-COMPOSE_PROJECT_NAME := lakebase-local-dev-$(DEV_CONTEXT_ID)
-export COMPOSE_PROJECT_NAME
-
-COMPOSE := docker compose -p $(COMPOSE_PROJECT_NAME)
-LAKEBASE_COMPOSE := $(COMPOSE) -f compose.yaml -f compose.lakebase.yaml --env-file .env.lakebase
-
-.PHONY: help dev-local dev-lakebase refresh-lakebase url compose dev-down dev-destroy hooks-install hooks-uninstall check
-
+.PHONY: help dev-local dev-lakebase refresh-lakebase url dev-down dev-destroy hooks-install hooks-uninstall check
 .DEFAULT_GOAL := help
 
 help: ## Show available commands
 	@awk -F ':.*## ' '/^[a-zA-Z_-]+:.*## / {printf "  \033[36m%-20s\033[0m %s\n", $$1, $$2}' $(MAKEFILE_LIST)
 
-dev-local: ## Start the app with its local PostgreSQL container
-	$(COMPOSE) up --build
+dev-local: ## Start native frontend/backend with session-scoped in-memory PGlite
+	@$(PYTHON) scripts/dev.py local
 
-dev-lakebase: ## Start the app with this Git branch's Lakebase branch
-	@status=0; ./scripts/lakebase-branch.sh --wait-for-hook || status=$$?; \
-		if [[ $$status -eq 2 ]]; then \
-			./scripts/lakebase-branch.sh; \
-		elif [[ $$status -ne 0 ]]; then \
-			exit $$status; \
-		fi
-	$(LAKEBASE_COMPOSE) up --build
+dev-lakebase: ## Start native frontend/backend with this Git branch's Lakebase branch
+	@$(PYTHON) scripts/dev.py lakebase
 
-refresh-lakebase: ## Refresh the hourly credential and recreate the backend
-	@./scripts/lakebase-branch.sh --refresh-only
-	$(LAKEBASE_COMPOSE) up -d --force-recreate backend
+refresh-lakebase: ## Refresh credentials and restart only the running Lakebase backend
+	@$(PYTHON) scripts/dev.py refresh
 
-url: ## Print this worktree's storefront URL
-	@address="$$($(COMPOSE) port frontend 80 2>/dev/null)" && [[ -n "$$address" ]] || { \
-		echo "Frontend is not running; start it with make dev-local or make dev-lakebase." >&2; \
-		exit 1; \
-	}; \
-	printf 'http://%s\n' "$$address"
+url: ## Print this worktree's running storefront URL
+	@$(PYTHON) scripts/dev.py url
 
-compose: ## Run a scoped Compose command with ARGS='...'
-	$(if $(strip $(ARGS)),,$(error Usage: make compose ARGS='logs -f backend'))
-	$(COMPOSE) $(ARGS)
+dev-down: ## Stop this checkout's session and discard its in-memory database
+	@$(PYTHON) scripts/dev.py down
 
-dev-down: ## Stop local or Lakebase development containers
-	$(COMPOSE) down
-
-dev-destroy: ## Stop local or Lakebase development containers
-	$(COMPOSE) down --volumes
+dev-destroy: ## Stop development and remove saved session logs and metadata
+	@$(PYTHON) scripts/dev.py destroy
 
 hooks-install: ## Install standard Git hooks, preserving existing hooks
 	@./scripts/manage-post-checkout-hook.sh install
@@ -56,15 +31,9 @@ hooks-install: ## Install standard Git hooks, preserving existing hooks
 hooks-uninstall: ## Remove DataCart hooks and restore previous Git settings
 	@./scripts/manage-post-checkout-hook.sh uninstall
 
-check: ## Validate Git hooks, branch naming, and both Compose modes
-	@python3 -m unittest discover -s tests -p "test_git_hooks.py"
+check: ## Validate hooks, workshop setup, native runtime, and PGlite behavior
+	@$(PYTHON) scripts/dev.py setup
+	@.venv/bin/python -m unittest discover -s tests -p 'test_*.py'
 	@bash ./scripts/dev-context-id.sh --self-test
 	@./scripts/lakebase-branch.sh --self-test
-	@python3 -c 'from server.runtime import get_runtime_info; local = get_runtime_info({"APP_RUNTIME": "docker"}); assert local == {"backend": "docker", "database": {"location": "local-docker", "project": None, "branch": None}}; lakebase = get_runtime_info({"DATABRICKS_APP_NAME": "storefront", "ENDPOINT_NAME": "projects/demo-project/branches/dev-alex/endpoints/primary"}); assert lakebase == {"backend": "production", "database": {"location": "lakebase", "project": "demo-project", "branch": "dev-alex"}}'
-	@$(COMPOSE) config --format json | jq -e --arg name "$(COMPOSE_PROJECT_NAME)" \
-		'.name == $$name and (.services.postgres.ports == null) and (.services.backend.ports == null) and (.services.frontend.ports == [{host_ip: "127.0.0.1", mode: "ingress", protocol: "tcp", published: "0", target: 80}])' >/dev/null
-	@PGHOST=lakebase.example PGUSER=developer@example.com PGPASSWORD=test \
-		PGOPTIONS='-c role=datacart_storefront_owner' \
-		ENDPOINT_NAME=projects/test/branches/test/endpoints/primary \
-		$(COMPOSE) -f compose.yaml -f compose.lakebase.yaml config --format json | \
-		jq -e '.services.postgres == null and .services.backend.depends_on.postgres.required == false and .services.backend.environment.PGHOST == "lakebase.example" and .services.backend.environment.PGOPTIONS == "-c role=datacart_storefront_owner"' >/dev/null
+	@cd frontend && npm run build

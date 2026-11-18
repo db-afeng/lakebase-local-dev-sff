@@ -101,7 +101,7 @@ names or tokens in the notebooks. For local validation, use the explicitly chose
 databricks ssh connect --profile lakebase-workshop --name datacart-validation
 ```
 
-For local Docker development against branches of the prepared project, set in
+For native local development against branches of the prepared project, set in
 `lakebase.config`:
 
 ```bash

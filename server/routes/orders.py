@@ -61,7 +61,7 @@ def get_order_detail(order_id: int):
     try:
         with pool.connection() as conn:
             with conn.cursor() as cur:
-                priority_select = ", o.priority" if column_exists("orders", "priority") else ""
+                priority_select = ", o.priority" if column_exists("orders", "priority", conn) else ""
 
                 cur.execute(
                     f"""
@@ -81,7 +81,7 @@ def get_order_detail(order_id: int):
                 order = dict(zip(cols, row))
 
                 items = []
-                if table_exists("order_items"):
+                if table_exists("order_items", conn):
                     cur.execute(
                         f"""
                         SELECT oi.id, p.name AS product, oi.quantity,

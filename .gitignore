@@ -28,3 +28,4 @@ npm-debug.log*
 frontend/dist/
 .ruff_cache/
 .env.lakebase.tmp.*
+.dev/

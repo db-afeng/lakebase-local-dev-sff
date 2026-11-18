@@ -1,5 +1,6 @@
 import time
 import logging
+from contextlib import nullcontext
 from server.db import pool, DB_SCHEMA
 
 logger = logging.getLogger(__name__)
@@ -9,9 +10,10 @@ _cache_ts: float = 0
 CACHE_TTL = 30
 
 
-def _refresh_cache():
+def _refresh_cache(connection=None):
     global _cache, _cache_ts
-    with pool.connection() as conn:
+    # Reuse a caller's transaction instead of acquiring a second pool slot.
+    with (nullcontext(connection) if connection is not None else pool.connection()) as conn:
         with conn.cursor() as cur:
             cur.execute(
                 "SELECT table_name, column_name "
@@ -27,10 +29,10 @@ def _refresh_cache():
             _cache_ts = time.time()
 
 
-def get_schema() -> dict[str, set[str]]:
+def get_schema(connection=None) -> dict[str, set[str]]:
     if time.time() - _cache_ts > CACHE_TTL:
         try:
-            _refresh_cache()
+            _refresh_cache(connection)
         except Exception as e:
             logger.warning(f"Schema detection failed: {e}")
             if _cache:
@@ -44,12 +46,12 @@ def invalidate_cache():
     _cache_ts = 0
 
 
-def table_exists(table: str) -> bool:
-    return table in get_schema()
+def table_exists(table: str, connection=None) -> bool:
+    return table in get_schema(connection)
 
 
-def column_exists(table: str, column: str) -> bool:
-    schema = get_schema()
+def column_exists(table: str, column: str, connection=None) -> bool:
+    schema = get_schema(connection)
     return table in schema and column in schema[table]
 
 
@@ -67,18 +69,18 @@ def get_features() -> dict:
     }
 
 
-def get_promotions_table() -> str | None:
+def get_promotions_table(connection=None) -> str | None:
     """Return the actual promotions table name.
 
     Prefers the canonical names (`promotions_synced_prod`, then `promotions`),
     but falls back to any table whose name contains "promotions" so the
     storefront still works if the synced table was named slightly differently.
     """
-    if table_exists("promotions_synced_prod"):
+    if table_exists("promotions_synced_prod", connection):
         return "promotions_synced_prod"
-    if table_exists("promotions"):
+    if table_exists("promotions", connection):
         return "promotions"
-    matches = sorted(t for t in get_schema() if "promotions" in t.lower())
+    matches = sorted(t for t in get_schema(connection) if "promotions" in t.lower())
     return matches[0] if matches else None
 
 

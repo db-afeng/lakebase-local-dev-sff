@@ -1,12 +1,14 @@
 # DataCart Storefront
 
-Includes the React frontend, FastAPI backend, Alembic migrations, Docker stack,
-and Lakebase branch tooling. Credentials, caches, build output, and installed
-dependencies are generated locally. Docker Compose uses a `lakebase-local-dev-`
-project prefix to keep this checkout separate from the original storefront.
+Includes the React frontend, FastAPI backend, Alembic migrations, native local
+development tooling, and Lakebase branch tooling. Credentials, caches, build
+output, and installed dependencies are generated locally.
 
-Prerequisites: Docker with Compose, Make, Git with `user.name` configured,
-Python 3, and `jq`. No Databricks credentials are needed for local PostgreSQL.
+Prerequisites for macOS/Linux: Python 3.12+, Node.js 20+ (a supported LTS release
+is recommended), npm, Make, and Git with `user.name` configured. Local development
+uses PGlite, an in-memory PostgreSQL build, and needs no Databricks credentials
+or PostgreSQL installation. Lakebase mode additionally needs the Databricks CLI
+and `jq`.
 
 ## Prepare a Databricks workspace
 
@@ -18,77 +20,90 @@ Notebook 4 previews and explicitly tears down the app and dedicated project.
 You can use an existing clickops project in notebook 0 or start directly at 2.
 Import the complete repository so supporting files remain available.
 
-## Local development with Docker
-
-The local stack builds the React storefront from source and serves it with
-Nginx, alongside the FastAPI backend and PostgreSQL 17.
+## Local development
 
 ```bash
 make dev-local
 ```
 
-Always use the Make targets rather than raw `docker compose` commands. Each
-development context gets one eight-character ID shared by its Compose project
-and Lakebase branch. Cursor worktrees reuse the ID embedded in an exact
-`cursor/<id>` Git branch; other branches derive it from the raw Git user and
-branch names. This isolates containers, networks, images, and `postgres-data`
-volumes between feature branches.
+This creates a checkout-local `.venv`, installs missing or changed Python and
+Node dependencies, and starts three native processes: PGlite, FastAPI with
+Python reload, and Vite with frontend hot reload. Alembic applies the existing
+PostgreSQL migrations before FastAPI starts. PGlite packages have a separate
+lockfile under `scripts/dev/`; they are not production app dependencies.
 
-The Compose build uses the Databricks PyPI and npm proxies by default. Override
+Package installation honours your pip/npm configuration. Override
 `PIP_INDEX_URL` or `NPM_REGISTRY` when different package indexes are required.
+The first startup needs network access to install dependencies.
 
-Docker assigns each development context a free loopback port for the
-storefront. From a second terminal, print its URL with:
+Each session uses available loopback ports. From a second terminal, print the
+storefront URL with:
 
 ```bash
 make url
 ```
 
 Append `/supplier` for the supplier view or `/api/health` for backend health.
-FastAPI and PostgreSQL are not published on host ports; the storefront proxies
-API requests to FastAPI over the worktree's private Compose network.
+Vite proxies `/api` and `/supplier` to FastAPI. All services bind to `127.0.0.1`.
+The runtime indicator identifies the local database as PGlite.
 
-The backend source is bind-mounted, so Python changes trigger an automatic
-reload. Frontend source changes require rebuilding the frontend image:
+A local database starts with **schema only, without seed data**. Records added
+manually survive frontend edits, browser refreshes, and Python reloads. They
+are discarded when PGlite or the development session stops. Carts remain
+backend memory and still reset on backend reload. Optional feature tables are
+not created automatically.
+
+The terminal streams labelled service logs, also saved under
+`.dev/<context-id>/`. Use Ctrl+C or a second terminal to stop development:
 
 ```bash
-make compose ARGS='build frontend'
-make compose ARGS='up -d frontend'
-```
-
-Useful commands:
-
-```bash
-make compose ARGS='logs -f backend'
-make compose ARGS='exec postgres psql -U datacart -d datacart'
 make dev-down
-make dev-destroy  # Also deletes only this branch context's local database data.
+make dev-destroy  # Also removes this checkout's saved session logs/metadata.
 ```
 
-Alembic migrations run automatically before the backend starts. A fresh
-PostgreSQL volume creates an empty `ecommerce` schema; Alembic does not load fixtures.
-Run `make dev-down` before switching branches in the same checkout so the old
-branch context does not keep running.
+Both commands are safe to repeat. They retain installed dependencies and do not
+delete remote Lakebase resources. `make compose` has been removed; builds and
+restarts no longer require container commands. Python and frontend edits reload
+automatically. Restart the session to apply migration changes.
+
+Each development context has an eight-character ID. Cursor worktrees reuse the
+ID embedded in an exact `cursor/<id>` Git branch; other branches derive it from
+the raw Git user and branch names. Runtime state is checkout-local; separate
+worktrees get independent processes, ports, logs, and in-memory databases. Only
+one session can run in a checkout at a time. Run `make dev-down` before changing
+Git branches; shutdown still finds the checkout's session after a branch change.
+Duplicate startup or changing modes requires stopping the existing session first.
+
+A startup failure or unexpected service exit stops the whole session. PGlite is
+never restarted automatically with an empty replacement database. A later
+explicit startup detects stale metadata and cleans up verifiable leftover
+processes. Never remove `.dev/` while a session is running.
+
+PGlite uses one underlying PostgreSQL session. The app uses a one-connection
+pool, so local requests serialize database access. An additional socket client
+is allowed for maintenance (host `127.0.0.1`, port `database_port` in
+`.dev/session.json`, database/user/password `postgres`, SSL disabled). Close
+maintenance transactions promptly. Use Lakebase mode for realistic concurrency,
+permissions, and PostgreSQL integration validation.
 
 ## Local development with Lakebase
 
-Lakebase mode omits the local PostgreSQL container and connects the backend to
-an ephemeral Lakebase Autoscaling branch copied from `production`.
+Lakebase mode starts the same local frontend and backend, connecting FastAPI to
+an ephemeral Lakebase Autoscaling branch copied from `production`. It does not
+start PGlite.
 
-Prerequisites:
+Additional prerequisites:
 
 - Databricks CLI with `databricks postgres` support (0.294.0 or newer)
-- An authenticated Databricks CLI profile, `jq`, and Python 3
+- An explicitly selected authenticated CLI profile and `jq`
 - An existing Lakebase project, specified by `LAKEBASE_PROJECT_NAME`
 - An authorized PostgreSQL OAuth role; use your workspace username after notebook setup
 
-Set `LAKEBASE_PROJECT_NAME` in your environment or `lakebase.config`.
-Connections use the `lakebase-app-schema-owner` group role by default. For the
-notebook setup, use your workspace username as `LAKEBASE_PG_ROLE` and set
+Set `LAKEBASE_PROJECT_NAME` and your chosen `LAKEBASE_PROFILE` in your environment
+or `lakebase.config`; no profile is selected by default. Connections use the
+`lakebase-app-schema-owner` group role by default. For the notebook setup, use
+your workspace username as `LAKEBASE_PG_ROLE` and set
 `LAKEBASE_PG_OPTIONS="-c role=datacart_storefront_owner"`; see the notebook README.
-Choose your Databricks profile explicitly.
-
-Start Lakebase development:
 
 ```bash
 LAKEBASE_PROJECT_NAME=<project-id> LAKEBASE_PROFILE=<profile> make dev-lakebase
@@ -97,22 +112,26 @@ LAKEBASE_PROJECT_NAME=<project-id> LAKEBASE_PROFILE=<profile> make dev-lakebase
 This creates or reuses a branch named
 `dev-<sanitized git user.name>-<sanitized git branch>-<context-id>`, omitting a
 duplicate suffix when a Cursor branch already ends in that ID. It waits for the
-read-write endpoint, writes a mode-0600 worktree-local `.env.lakebase`, and
-starts Compose with `compose.lakebase.yaml`. For non-Cursor branches, the
-derived ID preserves distinctions between Git refs that sanitize to the same
-text. The optional `LAKEBASE_PG_OPTIONS` session role keeps migration ownership
-consistent with the seeded parent database. The generated credential expires after about one hour. Refresh
-it and recreate only this development context's backend with:
+read-write endpoint, writes a mode-0600 worktree-local `.env.lakebase`, and starts
+the app. For non-Cursor branches, the derived ID preserves distinctions between
+Git refs that sanitize to the same text. `LAKEBASE_PG_OPTIONS` preserves the
+session role and migration ownership used by the seeded parent database.
+Development branches inherit their parent's data; startup does not seed them.
+
+Generated credentials expire after about an hour. While a Lakebase session is
+running, refresh credentials and restart only its backend with:
 
 ```bash
 LAKEBASE_PROJECT_NAME=<project-id> LAKEBASE_PROFILE=<profile> make refresh-lakebase
 ```
 
-Stop either development mode with `make dev-down`. Development branches expire
-after six hours; stopping Compose does not delete one immediately.
+Refresh returns when the backend is database-ready. It keeps the frontend
+process and URL, and refuses inactive sessions, local PGlite sessions, and
+sessions whose Git context has changed. Deployed apps retain their existing
+OAuth token generation behavior.
 
-Local PostgreSQL starts with the schema only. Notebook 2 seeds the selected
-Lakebase database; development branches inherit their parent branch's data.
+Stop either mode with `make dev-down`. Development branches expire after six
+hours; stopping the local processes does not delete one immediately.
 
 ### Optional post-checkout provisioning
 
@@ -143,7 +162,7 @@ Installation is idempotent and does not provision Lakebase immediately.
 
 Branch checkouts provision Lakebase asynchronously; file checkouts are ignored.
 Each checkout writes progress to `lakebase-branch-post-commit.log`. The hook
-prepares `.env.lakebase` but does not restart containers. `make dev-lakebase`
+prepares `.env.lakebase` but does not restart running services. `make dev-lakebase`
 waits for provisioning or retries synchronously when necessary.
 
 To remove the dispatcher and restore the previous local setting (or resume the
@@ -163,7 +182,7 @@ Earlier versions registered a user hook under `~/.databricks/user-githooks/`.
 This installer leaves that external file alone. While forwarding an older hook,
 the dispatcher suppresses duplicate DataCart provisioning.
 
-Run the local checks with:
+Run the local checks (including isolated PGlite integration tests and a frontend build) with:
 
 ```bash
 make check
@@ -171,7 +190,7 @@ make check
 
 ## Current limitations
 
-- Local PostgreSQL has no automatic seed data. Add products, inventory, and customer ID 1
+- Local PGlite has no automatic seed data. Add products, inventory, and customer ID 1
   before exercising a purchase. Verified: `/api/account` currently returns HTTP
   500 when that customer is missing.
 - Carts live in backend memory and use a shared demo customer (ID 1). They reset

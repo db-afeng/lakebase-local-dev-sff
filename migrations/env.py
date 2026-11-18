@@ -14,6 +14,7 @@ if config.config_file_name is not None:
 
 target_metadata = None
 DB_SCHEMA = os.environ.get("DB_SCHEMA", "ecommerce")
+IS_PGLITE = os.environ.get("DB_MODE") == "pglite"
 _LOCK_NAME = "datacart-storefront-alembic"
 _CORE_TABLES = ("customers", "products", "inventory", "orders", "order_items")
 
@@ -99,10 +100,13 @@ def run_migrations_online() -> None:
                 "Lakebase project or transfer object ownership before adopting it."
             )
 
-        connection.execute(
-            text("SELECT pg_advisory_lock(hashtext(:name))"), {"name": _LOCK_NAME}
-        )
-        connection.commit()
+        # The local runner serializes migrations before opening the app pool.
+        # PGlite has one underlying session; advisory locks coordinate Lakebase only.
+        if not IS_PGLITE:
+            connection.execute(
+                text("SELECT pg_advisory_lock(hashtext(:name))"), {"name": _LOCK_NAME}
+            )
+            connection.commit()
         try:
             context.configure(
                 connection=connection,
@@ -115,11 +119,12 @@ def run_migrations_online() -> None:
         finally:
             if connection.in_transaction():
                 connection.rollback()
-            connection.execute(
-                text("SELECT pg_advisory_unlock(hashtext(:name))"),
-                {"name": _LOCK_NAME},
-            )
-            connection.commit()
+            if not IS_PGLITE:
+                connection.execute(
+                    text("SELECT pg_advisory_unlock(hashtext(:name))"),
+                    {"name": _LOCK_NAME},
+                )
+                connection.commit()
 
 
 if context.is_offline_mode():

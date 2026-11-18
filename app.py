@@ -69,7 +69,10 @@ def dbtest():
         "PGDATABASE": os.environ.get("PGDATABASE", "NOT SET"),
         "ENDPOINT_NAME": os.environ.get("ENDPOINT_NAME", "NOT SET"),
         "IS_APP": bool(os.environ.get("DATABRICKS_APP_NAME")),
-        "AUTH_MODE": "password" if "PGPASSWORD" in os.environ else "lakebase_oauth",
+        "AUTH_MODE": (
+            "pglite" if os.environ.get("DB_MODE") == "pglite"
+            else "password" if "PGPASSWORD" in os.environ else "lakebase_oauth"
+        ),
     }
 
     try:

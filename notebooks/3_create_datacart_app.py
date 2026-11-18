@@ -611,11 +611,11 @@ print("Database:", target["database"])
 # MAGIC Your local CLI profile supplies the workspace host and authentication. If needed,
 # MAGIC configure it locally with `databricks auth login --host <workspace-url> --profile <profile>`.
 # MAGIC Then run `make dev-lakebase`. It creates a development branch from the configured
-# MAGIC parent, inherits the seeded data, and generates `.env.lakebase` for Docker.
+# MAGIC parent, inherits the seeded data, and generates `.env.lakebase` for native local development.
 # MAGIC The session-role option keeps local migration ownership consistent with the app.
 # MAGIC
 # MAGIC `make hooks-install` is optional: it automates development-branch provisioning
-# MAGIC on Git checkouts while preserving existing hooks. It does not start containers.
+# MAGIC on Git checkouts while preserving existing hooks. It does not start local services.
 # MAGIC
 # MAGIC ## Finish · Review and clean up your workshop resources
 # MAGIC

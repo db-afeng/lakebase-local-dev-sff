@@ -7,8 +7,7 @@ def get_runtime_info(environ: Mapping[str, str] = os.environ) -> dict:
     if environ.get("DATABRICKS_APP_NAME"):
         backend = "production"
     else:
-        configured_backend = environ.get("APP_RUNTIME", "local")
-        backend = configured_backend if configured_backend in {"local", "docker"} else "local"
+        backend = "local"
 
     endpoint_parts = environ.get("ENDPOINT_NAME", "").split("/")
     if (
@@ -24,6 +23,6 @@ def get_runtime_info(environ: Mapping[str, str] = os.environ) -> dict:
             "branch": endpoint_parts[3],
         }
     else:
-        database = {"location": "local-docker", "project": None, "branch": None}
+        database = {"location": "local-pglite", "project": None, "branch": None}
 
     return {"backend": backend, "database": database}

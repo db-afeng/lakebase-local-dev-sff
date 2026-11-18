@@ -1,0 +1,10 @@
+{
+  "name": "datacart-dev-tools",
+  "private": true,
+  "type": "module",
+  "engines": { "node": ">=20" },
+  "dependencies": {
+    "@electric-sql/pglite": "0.5.16",
+    "@electric-sql/pglite-socket": "0.2.19"
+  }
+}
