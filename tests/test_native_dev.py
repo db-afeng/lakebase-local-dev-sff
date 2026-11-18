@@ -189,8 +189,11 @@ class NativeIntegrationTests(unittest.TestCase):
         shutil.copy2(SOURCE / ".dev/python-dependencies", repo / ".dev/python-dependencies")
 
     def command(self, command, root=None, check=True):
-        return subprocess.run([sys.executable, "scripts/dev.py", command], cwd=root or self.repo,
-                              env=self.env, text=True, capture_output=True, check=check, timeout=50)
+        result = subprocess.run([sys.executable, "scripts/dev.py", command], cwd=root or self.repo,
+                                env=self.env, text=True, capture_output=True, timeout=50)
+        if check:
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        return result
 
     def state(self, root=None):
         return json.loads(((root or self.repo) / ".dev/session.json").read_text())
