@@ -156,13 +156,22 @@ class Service:
         self.name = name
         self.ready = {}
         self.log = log_path.open("a", buffering=1)
+        if os.name == "nt":
+            # Uvicorn sends console Ctrl+C during reload. A process group alone
+            # cannot contain that event; give each service a hidden console.
+            startup = subprocess.STARTUPINFO()
+            startup.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+            startup.wShowWindow = subprocess.SW_HIDE
+            process_options = {"creationflags": subprocess.CREATE_NEW_CONSOLE,
+                               "startupinfo": startup}
+        else:
+            process_options = {"start_new_session": True, "pass_fds": pass_fds}
         try:
             self.process = subprocess.Popen(
                 service_command(command), cwd=root, env=env,
                 stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
                 bufsize=1, encoding="utf-8", errors="replace",
-                **({"creationflags": subprocess.CREATE_NEW_PROCESS_GROUP} if os.name == "nt"
-                   else {"start_new_session": True, "pass_fds": pass_fds}),
+                **process_options,
             )
         except OSError:
             self.log.close()
