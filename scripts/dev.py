@@ -420,7 +420,8 @@ class Runtime:
     def backend_ready(self):
         try:
             opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
-            with opener.open(self.state["backend_url"] + "/api/dbtest", timeout=0.5) as response:
+            # Readiness includes remote Lakebase queries, so allow network latency.
+            with opener.open(self.state["backend_url"] + "/api/dbtest", timeout=5) as response:
                 data = json.load(response)
             return data.get("db_connected") is True and "product_count" in data
         except (OSError, ValueError, urllib.error.URLError):
